@@ -74,11 +74,13 @@ class SimulationResult():
         self.cash_key = cash_key
         self.simulator = simulator
         self.policy = policy
+        
+    @property
+    def summary_string(self):
+        return self.summary.to_string(float_format='{:,.3f}'.format)
 
+    @property
     def summary(self):
-        print(self._summary_string())
-
-    def _summary_string(self):
         data = collections.OrderedDict({
             'Number of periods':
                 self.u.shape[0],
@@ -103,9 +105,7 @@ class SimulationResult():
             'Average simulator time (sec)':
                 self.simulation_time.mean(),
         })
-
-        return (pd.Series(data=data).
-                to_string(float_format='{:,.3f}'.format))
+        return pd.Series(data=data)
 
     def log_data(self, name, t, entry):
         try:
@@ -139,11 +139,9 @@ class SimulationResult():
 
         Infers the timestamp of last element by increasing the final timestamp.
         """
-        tmp = self.h_next.shift(1)
-        tmp.iloc[0] = self.initial_portfolio
-        # TODO fix
-        # tmp.loc[self.h_next.index[-1] + self.timedelta]=self.h_next.iloc[-1]
-        return tmp
+        tmp = self.h_next.copy()
+        tmp.loc[tmp.index[0]-self.timedelta] = self.initial_portfolio
+        return tmp.sort_index()
 
     @property
     def v(self):
@@ -182,7 +180,7 @@ class SimulationResult():
         """
         val = self.v
         return pd.Series(data=val.values[1:] / val.values[:-1] - 1,
-                         index=val.index[:-1])
+                         index=val.index[1:])
 
     @property
     def growth_rates(self):
@@ -216,11 +214,11 @@ class SimulationResult():
 
     def get_best_quarter(self, benchmark=None):
         ret = self.get_quarterly_returns(benchmark)
-        return (ret.argmax(), ret.max())
+        return (ret.idxmax(), ret.max())
 
     def get_worst_quarter(self, benchmark=None):
         ret = self.get_quarterly_returns(benchmark)
-        return (ret.argmin(), ret.min())
+        return (ret.idxmin(), ret.min())
 
     @property
     def excess_returns(self):

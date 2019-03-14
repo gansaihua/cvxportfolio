@@ -29,8 +29,8 @@ limitations under the License.
 """
 
 from abc import ABCMeta, abstractmethod
-import pandas as pd
 import numpy as np
+import pandas as pd
 import logging
 import cvxpy as cvx
 
@@ -42,7 +42,7 @@ from cvxportfolio.utils.data_management import time_locator, null_checker
 
 __all__ = ['Hold', 'FixedTrade', 'PeriodicRebalance', 'AdaptiveRebalance',
            'SinglePeriodOpt', 'MultiPeriodOpt', 'ProportionalTrade',
-           'RankAndLongShort']
+           'RankAndLongShort', 'RangeBoundRebalance', 'WeighTarget', 'FactorMimicking']
 
 
 class BasePolicy(object):
@@ -214,6 +214,24 @@ class AdaptiveRebalance(BaseRebalance):
         diff = (weights - self.target).values
 
         if np.linalg.norm(diff, 2) > self.tracking_error:
+            return self._rebalance(portfolio)
+        else:
+            return self._nulltrade(portfolio)
+
+
+class RangeBoundRebalance(BaseRebalance):
+    """ Rebalance portfolio when deviates too far from target.
+    """
+    def __init__(self, target, threshold):
+        self.target = target
+        self.threshold = threshold
+        super(RangeBoundRebalance, self).__init__()
+
+    def get_trades(self, portfolio, t=pd.datetime.today()):
+        weights = portfolio / sum(portfolio)
+        diff = (weights - self.target).values
+
+        if diff.abs().sum() > 2 * self.threshold:
             return self._rebalance(portfolio)
         else:
             return self._nulltrade(portfolio)
@@ -392,3 +410,66 @@ class MultiPeriodOpt(SinglePeriodOpt):
         sum(prob_arr).solve(solver=self.solver)
         return pd.Series(index=portfolio.index,
                          data=(z_vars[0].value * value))
+
+
+class WeighTarget(BasePolicy):
+    def __init__(self, weights, lookback=0, holding_period=1):
+        super(WeighTarget, self).__init__()
+        self.weights = weights.shift(lookback).iloc[lookback::holding_period]
+
+    def get_trades(self, portfolio, t=pd.datetime.today()):
+        ret = self._nulltrade(portfolio)
+        if t in self.weights.index:
+            w = self.weights.loc[t]
+            ret = sum(portfolio) * w - portfolio
+        return ret
+
+
+class FactorMimicking(BasePolicy):
+    def __init__(self, scores, sectors, benchmark, threshold=0.2, holding_threshold=0.01):
+        super(FactorMimicking, self).__init__()
+        self.scores = scores
+        self.sectors = sectors
+        self.benchmark = benchmark
+        self.threshold = threshold
+        self.holding_threshold = holding_threshold
+
+    def get_trades(self, portfolio, t=pd.datetime.today()):
+        equity = portfolio.sum()
+        sector = time_locator(self.sectors, t)
+        try:
+            scores = self.scores.loc[t]
+        except KeyError:
+            return self._nulltrade(portfolio)
+        try:
+            benchmark = self.benchmark.loc[t]
+        except KeyError:
+            benchmark = portfolio / equity
+
+        held_stocks = (portfolio != 0) & pd.notnull(portfolio)
+        target_stocks = (benchmark != 0) & pd.notnull(benchmark)
+
+        liked_stocks = target_stocks & (scores.rank(method='min', ascending=False, pct=True) <= self.threshold)
+        large_holdings = benchmark > self.holding_threshold
+
+        changes = pd.Series(0, index=scores.index)
+
+        mask = ~liked_stocks & large_holdings
+        changes[mask] = -self.holding_threshold
+
+        mask = ~liked_stocks & ~large_holdings & target_stocks
+        changes[mask] = changes[mask].sub(benchmark[mask], fill_value=0)
+
+        total_uw_by_sectors = changes.groupby(sector).sum()
+        n_ow_by_sectors = liked_stocks.groupby(sector).sum()
+        avg_ow_by_sectors = -total_uw_by_sectors.div(n_ow_by_sectors, fill_value=0)
+
+        for s, ow in avg_ow_by_sectors.iteritems():
+            mask = sector == s
+            if np.isinf(ow):
+                changes[mask] = 0
+            else:
+                changes[liked_stocks & mask] = ow
+
+        target_portfolio = benchmark.add(changes, fill_value=0) * equity
+        return target_portfolio.sub(portfolio, fill_value=0)
